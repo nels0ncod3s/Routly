@@ -23,6 +23,7 @@ import {
   Plus,
   RotateCcw,
   Route,
+  Search,
   Sparkles,
   Trash2,
   X,
@@ -31,6 +32,7 @@ import {
 
 const LAGOS_CENTER = [6.5244, 3.3792]
 const MAX_STOPS = 10
+const SEARCH_RESULT_LIMIT = 10
 
 const exampleLocations = {
   start: {
@@ -94,26 +96,53 @@ function MapBounds({ points, routeGeometry }) {
   return null
 }
 
-async function geocodeLocation(query) {
+const getResultLabel = (result) => {
+  const address = result.address || {}
+  return (
+    result.name ||
+    address.road ||
+    address.neighbourhood ||
+    address.suburb ||
+    address.city ||
+    address.town ||
+    address.village ||
+    result.display_name?.split(',')[0] ||
+    'Unnamed place'
+  )
+}
+
+const getResultContext = (result) => {
+  const address = result.address || {}
+  const parts = [
+    address.city || address.town || address.village || address.county,
+    address.state,
+    address.country,
+  ].filter(Boolean)
+
+  return [...new Set(parts)].join(', ') || result.display_name
+}
+
+async function searchLocations(query) {
   const response = await fetch(
-    `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=ng&q=${encodeURIComponent(query)}`,
-    {
-      headers: {
-        Accept: 'application/json',
-      },
-    },
+    `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&dedupe=1&limit=${SEARCH_RESULT_LIMIT}&accept-language=en&q=${encodeURIComponent(query)}`,
+    { headers: { Accept: 'application/json' } },
   )
 
-  if (!response.ok) throw new Error('Could not search that location right now.')
-  const [result] = await response.json()
-  if (!result) throw new Error(`We couldn't find “${query}”. Try a more specific Lagos address.`)
+  if (!response.ok) throw new Error('Could not search locations right now.')
+  const results = await response.json()
 
-  return {
-    label: query.trim(),
-    displayName: result.display_name,
-    lat: Number(result.lat),
-    lon: Number(result.lon),
-  }
+  return results
+    .map((result) => ({
+      id: String(result.place_id),
+      label: getResultLabel(result),
+      displayName: result.display_name,
+      context: getResultContext(result),
+      type: result.type || result.category || 'place',
+      countryCode: result.address?.country_code?.toUpperCase() || '',
+      lat: Number(result.lat),
+      lon: Number(result.lon),
+    }))
+    .sort((a, b) => Number(b.countryCode === 'NG') - Number(a.countryCode === 'NG'))
 }
 
 async function reverseGeocode(lat, lon) {
@@ -203,17 +232,60 @@ function optimizeOrder(durations, pointCount) {
   return [0, ...reversedStops.reverse()]
 }
 
+function LocationResults({ results, onSelect, query, isLoading }) {
+  if (isLoading) {
+    return (
+      <div className="location-results location-results--status">
+        <span className="spinner spinner--dark" />
+        <span>Finding places named “{query}”…</span>
+      </div>
+    )
+  }
+
+  if (!results.length) return null
+
+  return (
+    <div className="location-results" role="listbox" aria-label={`Places matching ${query}`}>
+      <div className="location-results-head">
+        <span>Choose the exact place</span>
+        <small>{results.length} matches</small>
+      </div>
+      <div className="location-results-list">
+        {results.map((result) => (
+          <button
+            className="location-result"
+            key={result.id}
+            onClick={() => onSelect(result)}
+            type="button"
+            role="option"
+          >
+            <span className="location-result-icon"><MapPin size={14} /></span>
+            <span className="location-result-copy">
+              <strong>{result.label}</strong>
+              <small>{result.context}</small>
+              <em>{result.displayName}</em>
+            </span>
+            {result.countryCode && <span className="country-code">{result.countryCode}</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [originInput, setOriginInput] = useState('')
   const [origin, setOrigin] = useState(null)
+  const [originResults, setOriginResults] = useState([])
   const [stopInput, setStopInput] = useState('')
+  const [stopResults, setStopResults] = useState([])
   const [stops, setStops] = useState([])
   const [optimizedStops, setOptimizedStops] = useState([])
   const [routeData, setRouteData] = useState(null)
   const [baselineSeconds, setBaselineSeconds] = useState(0)
   const [baselineDistance, setBaselineDistance] = useState(0)
   const [isSearchingOrigin, setIsSearchingOrigin] = useState(false)
-  const [isAddingStop, setIsAddingStop] = useState(false)
+  const [isSearchingStop, setIsSearchingStop] = useState(false)
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -253,16 +325,17 @@ function App() {
     setBaselineDistance(0)
   }
 
-  const handleSetOrigin = async () => {
-    if (!originInput.trim()) return
+  const handleOriginSearch = async () => {
+    const query = originInput.trim()
+    if (!query) return
     clearFeedback()
+    setOriginResults([])
     setIsSearchingOrigin(true)
+
     try {
-      const location = await geocodeLocation(originInput)
-      setOrigin({ id: 'origin', ...location })
-      resetCalculatedRoute()
-      setOriginInput('')
-      setMessage('Starting point set.')
+      const results = await searchLocations(query)
+      setOriginResults(results)
+      if (!results.length) setError(`No places named “${query}” were found. Try adding a city, area or street.`)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -270,8 +343,18 @@ function App() {
     }
   }
 
+  const handleSelectOrigin = (location) => {
+    clearFeedback()
+    setOrigin({ id: 'origin', ...location })
+    setOriginInput('')
+    setOriginResults([])
+    resetCalculatedRoute()
+    setMessage(`Starting point set to ${location.displayName}.`)
+  }
+
   const handleUseCurrentLocation = () => {
     clearFeedback()
+    setOriginResults([])
     if (!navigator.geolocation) {
       setError('Geolocation is not supported on this device.')
       return
@@ -308,24 +391,34 @@ function App() {
     )
   }
 
-  const handleAddStop = async () => {
-    if (!stopInput.trim() || stops.length >= MAX_STOPS) return
+  const handleStopSearch = async () => {
+    const query = stopInput.trim()
+    if (!query || stops.length >= MAX_STOPS) return
     clearFeedback()
-    setIsAddingStop(true)
+    setStopResults([])
+    setIsSearchingStop(true)
+
     try {
-      const location = await geocodeLocation(stopInput)
-      setStops((current) => [
-        ...current,
-        { id: `stop-${Date.now()}`, ...location },
-      ])
-      resetCalculatedRoute()
-      setStopInput('')
-      setMessage('Stop added. Add another or optimize your route.')
+      const results = await searchLocations(query)
+      setStopResults(results)
+      if (!results.length) setError(`No places named “${query}” were found. Try adding a city, area or street.`)
     } catch (err) {
       setError(err.message)
     } finally {
-      setIsAddingStop(false)
+      setIsSearchingStop(false)
     }
+  }
+
+  const handleSelectStop = (location) => {
+    clearFeedback()
+    setStops((current) => [
+      ...current,
+      { id: `stop-${Date.now()}-${location.id}`, ...location },
+    ])
+    resetCalculatedRoute()
+    setStopInput('')
+    setStopResults([])
+    setMessage(`${location.label} added. Add another stop or optimize your route.`)
   }
 
   const handleRemoveStop = (id) => {
@@ -372,6 +465,8 @@ function App() {
     clearFeedback()
     setOrigin(exampleLocations.start)
     setStops(exampleLocations.stops)
+    setOriginResults([])
+    setStopResults([])
     setOptimizedStops([])
     setRouteData(null)
     setBaselineSeconds(0)
@@ -385,6 +480,8 @@ function App() {
     resetCalculatedRoute()
     setOriginInput('')
     setStopInput('')
+    setOriginResults([])
+    setStopResults([])
     clearFeedback()
   }
 
@@ -454,21 +551,27 @@ function App() {
               </div>
             ) : (
               <>
-                <div className="input-row">
+                <div className="input-row location-search-row">
                   <div className="text-input-wrap">
                     <Navigation size={17} />
                     <input
                       value={originInput}
-                      onChange={(event) => setOriginInput(event.target.value)}
-                      onKeyDown={(event) => event.key === 'Enter' && handleSetOrigin()}
-                      placeholder="e.g. Yaba, Lagos"
+                      onChange={(event) => {
+                        setOriginInput(event.target.value)
+                        setOriginResults([])
+                      }}
+                      onKeyDown={(event) => event.key === 'Enter' && handleOriginSearch()}
+                      placeholder="e.g. Victoria Island"
                       aria-label="Starting point"
+                      autoComplete="off"
                     />
                   </div>
-                  <button className="compact-button" onClick={handleSetOrigin} disabled={!originInput.trim() || isSearchingOrigin}>
-                    {isSearchingOrigin ? <span className="spinner" /> : <Check size={17} />}
+                  <button className="compact-button" onClick={handleOriginSearch} disabled={!originInput.trim() || isSearchingOrigin} aria-label="Search starting points">
+                    {isSearchingOrigin ? <span className="spinner" /> : <Search size={17} />}
                   </button>
+                  <LocationResults results={originResults} onSelect={handleSelectOrigin} query={originInput} isLoading={isSearchingOrigin} />
                 </div>
+                <p className="search-helper">Search first, then choose the exact city or address from the matches.</p>
                 <button className="location-button" onClick={handleUseCurrentLocation} disabled={isSearchingOrigin}>
                   <LocateFixed size={16} /> Use my current location
                 </button>
@@ -493,20 +596,30 @@ function App() {
           </div>
 
           {stops.length < MAX_STOPS && (
-            <div className="input-row add-stop-row">
-              <div className="text-input-wrap">
-                <MapPin size={17} />
-                <input
-                  value={stopInput}
-                  onChange={(event) => setStopInput(event.target.value)}
-                  onKeyDown={(event) => event.key === 'Enter' && handleAddStop()}
-                  placeholder="Add a delivery address"
-                  aria-label="Delivery stop"
-                />
+            <div className="location-search-block">
+              <div className="input-row add-stop-row location-search-row">
+                <div className="text-input-wrap">
+                  <MapPin size={17} />
+                  <input
+                    value={stopInput}
+                    onChange={(event) => {
+                      setStopInput(event.target.value)
+                      setStopResults([])
+                    }}
+                    onKeyDown={(event) => event.key === 'Enter' && handleStopSearch()}
+                    placeholder="Add a delivery address"
+                    aria-label="Delivery stop"
+                    autoComplete="off"
+                  />
+                </div>
+                <button className="compact-button" onClick={handleStopSearch} disabled={!stopInput.trim() || isSearchingStop} aria-label="Search delivery stops">
+                  {isSearchingStop ? <span className="spinner" /> : <Search size={18} />}
+                </button>
+                <LocationResults results={stopResults} onSelect={handleSelectStop} query={stopInput} isLoading={isSearchingStop} />
               </div>
-              <button className="compact-button" onClick={handleAddStop} disabled={!stopInput.trim() || isAddingStop}>
-                {isAddingStop ? <span className="spinner" /> : <Plus size={18} />}
-              </button>
+              {stopInput && !stopResults.length && !isSearchingStop && (
+                <p className="search-helper">Press Enter or the search button, then pick the correct match.</p>
+              )}
             </div>
           )}
 
