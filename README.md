@@ -1,16 +1,40 @@
-# React + Vite
+# Routly
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Routly is a multi-stop delivery route planner built for riders and small delivery teams. Add a starting point and multiple delivery drops, then let Routly reorder the stops to reduce driving time and distance.
 
-Currently, two official plugins are available:
+## MVP features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React + Vite, written in JSX
+- OpenStreetMap + Leaflet interactive map
+- OpenStreetMap Nominatim geocoding
+- OSRM road travel-time matrix + road route geometry
+- Exact fixed-start route optimization for up to 10 delivery stops
+- ETA and distance for every route leg
+- Total trip time and distance
+- Estimated fuel and fuel-cost savings based on configurable efficiency / fuel price
+- Current-location support
+- Lagos demo route
+- Responsive mobile UI
+- Pinch zoom disabled at page viewport level
+- Custom SVG favicon
 
-## React Compiler
+## Run locally
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npm run dev
+```
 
-## Expanding the Oxlint configuration
+## Production build
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```bash
+npm run build
+```
+
+## Routing approach
+
+Routly first asks OSRM for the road travel-time and distance matrix between the starting point and every stop. It then solves the fixed-start shortest Hamiltonian path with dynamic programming, keeping the rider's origin fixed while finding the fastest ordering of the remaining stops. The final ordered route is requested from OSRM and drawn on the map.
+
+## Production note
+
+This MVP uses public OpenStreetMap/Nominatim and OSRM demo infrastructure. For production traffic, move geocoding and routing behind a paid or self-hosted provider and add request caching/rate limiting.
