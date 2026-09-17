@@ -1,0 +1,33 @@
+.planner-hint::after {
+  content: 'ETA includes a time-of-day traffic buffer and realistic urban-speed floor. It is not live traffic telemetry.';
+  display: block;
+  margin-top: 5px;
+  color: #68766d;
+  font-weight: 600;
+}
+
+.results-heading::before {
+  content: 'TRAFFIC-ADJUSTED ETA';
+  display: inline-flex;
+  align-items: center;
+  min-height: 23px;
+  margin-bottom: 9px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #eff8e9;
+  color: #496638;
+  font: 600 8px/1 'DM Mono', monospace;
+  letter-spacing: .08em;
+}
+
+@media (max-width: 680px) {
+  .planner-hint::after {
+    max-width: 320px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .results-heading::before {
+    margin-bottom: 7px;
+  }
+}
