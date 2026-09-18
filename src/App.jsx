@@ -10,7 +10,6 @@ import {
 import L from 'leaflet'
 import {
   ArrowRight,
-  Bike,
   Check,
   ChevronDown,
   CircleAlert,
@@ -495,36 +494,60 @@ function App() {
         <div className="topbar-badge"><span></span> Built for last-mile delivery</div>
       </header>
 
-      <section className="hero" id="top">
-        <div className="hero-copy">
-          <div className="eyebrow"><Sparkles size={14} /> Route intelligence for everyday riders</div>
-          <h1>Stop riding in circles.<br /><span>Take the smarter route.</span></h1>
-          <p>
-            Add every delivery drop. Routly reshuffles them into a faster road sequence,
-            estimates each leg, and shows how much time, distance and fuel you can save.
-          </p>
-          <div className="hero-proof">
-            <div><strong>01</strong><span>Add your drops</span></div>
-            <ArrowRight size={16} />
-            <div><strong>02</strong><span>Optimize once</span></div>
-            <ArrowRight size={16} />
-            <div><strong>03</strong><span>Ride smarter</span></div>
+      <section className="hero" id="top" aria-labelledby="hero-title">
+        <div className="hero-main">
+          <div className="hero-copy">
+            <div className="eyebrow"><span className="hero-status" /> LESS BACKTRACKING. MORE DELIVERING.</div>
+            <h1 id="hero-title">Every stop.<br />One <span>smarter</span><br />route.</h1>
+            <p>Your drops, in the right order. Plan a faster delivery run with clear trip estimates and a little more fuel left in the tank.</p>
+            <div className="hero-actions">
+              <a className="hero-primary" href="#planner">Plan my route <ArrowRight size={19} /></a>
+              <button className="hero-secondary" onClick={() => {
+                handleLoadExample()
+                document.getElementById('planner')?.focus({ preventScroll: true })
+                document.getElementById('planner')?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+              }}>Try a Lagos example <ArrowRight size={16} /></button>
+            </div>
+            <div className="hero-note"><Check size={14} /> Up to 10 stops <span>·</span> No sign-up needed</div>
+          </div>
+
+          <div className="route-preview" role="img" aria-label="Illustration: a route connects a starting point to four delivery stops in a more efficient order. Actual routes and savings are calculated in the planner.">
+            <div className="preview-heading"><span><Route size={17} /> THE BETTER WAY AROUND</span><span className="preview-demo">Illustration</span></div>
+            <div className="preview-map" aria-hidden="true">
+              <svg viewBox="0 0 560 360" className="preview-map-art">
+                <defs>
+                  <pattern id="street-grid" width="56" height="56" patternTransform="rotate(-18)" patternUnits="userSpaceOnUse"><path d="M0 0H56V56" fill="none" stroke="#294236" strokeWidth="1" /></pattern>
+                </defs>
+                <rect width="560" height="360" fill="url(#street-grid)" />
+                <path d="M480 -20C365 60 460 120 390 190S380 315 290 380" stroke="#213e30" strokeWidth="60" fill="none" />
+                <path d="M-20 275L580 75M90 -20L200 380M-20 100L580 280" stroke="#304a3a" strokeWidth="9" fill="none" />
+                <path d="M80 258L182 81L455 129L275 246L350 62" className="preview-old-route" />
+                <path d="M80 258L133 240Q149 235 156 213L182 81L316 57Q341 51 350 62L455 129L402 175L275 246" className="preview-new-route" />
+                <g className="preview-start"><circle cx="80" cy="258" r="21" /><path d="M72 263L80 249L88 263L80 260Z" /></g>
+                {[[182, 81, '1'], [350, 62, '2'], [455, 129, '3'], [275, 246, '4']].map(([x, y, label]) => (
+                  <g className="preview-stop" key={label}><circle cx={x} cy={y} r="19" /><text x={x} y={y} dy=".35em" textAnchor="middle">{label}</text></g>
+                ))}
+                <text x="48" y="303" className="preview-map-label">START HERE</text>
+                <text x="254" y="292" className="preview-map-label">LAST DROP</text>
+              </svg>
+              <div className="preview-map-key"><span /> Smarter order <span /> Entered order</div>
+            </div>
+            <div className="preview-summary">
+              <span className="preview-summary-icon"><Check size={21} /></span>
+              <div><strong>Same stops. Better sequence.</strong><p>A clear plan from your first drop to your last.</p></div>
+              <ArrowRight size={20} />
+            </div>
           </div>
         </div>
-
-        <div className="hero-orbit" aria-hidden="true">
-          <div className="orbit-card orbit-card--one"><MapPin size={18} /> C</div>
-          <div className="orbit-card orbit-card--two"><MapPin size={18} /> A</div>
-          <div className="orbit-card orbit-card--three"><MapPin size={18} /> B</div>
-          <div className="orbit-bike"><Bike size={34} /></div>
-          <svg viewBox="0 0 460 300" className="orbit-line">
-            <path d="M55 220C96 88 188 248 240 137C278 57 372 63 412 123" />
-          </svg>
-          <div className="orbit-caption"><Zap size={15} /> A → B → C becomes C → A → B</div>
+        <div className="hero-features" aria-label="Route planning features">
+          <div><Route size={20} /><span><strong>A better stop order</strong><small>Less doubling back</small></span></div>
+          <div><Clock3 size={20} /><span><strong>Know your trip time</strong><small>Estimates for every leg</small></span></div>
+          <div><Fuel size={20} /><span><strong>See your fuel savings</strong><small>Compare before you ride</small></span></div>
+          <a href="#planner">Your next run starts here <ArrowRight size={18} /></a>
         </div>
       </section>
 
-      <section className="workspace">
+      <section className="workspace" id="planner" tabIndex={-1} aria-label="Route planner">
         <aside className="planner-panel">
           <div className="panel-heading">
             <div>
