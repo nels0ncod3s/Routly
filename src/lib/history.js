@@ -11,13 +11,23 @@ const safeParse = (value, fallback) => {
 
 export function loadRouteHistory() {
   if (typeof window === 'undefined') return []
-  const value = safeParse(window.localStorage.getItem(HISTORY_KEY), [])
-  return Array.isArray(value) ? value : []
+
+  try {
+    const value = safeParse(window.localStorage.getItem(HISTORY_KEY), [])
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
+  }
 }
 
 const persist = (items) => {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, MAX_HISTORY)))
+
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, MAX_HISTORY)))
+  } catch {
+    // History is a convenience feature. Routing must continue even if storage is blocked.
+  }
 }
 
 export function addRouteHistory(existing, entry) {
