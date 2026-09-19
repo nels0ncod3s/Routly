@@ -11,12 +11,14 @@ import L from 'leaflet'
 import {
   ArrowRight,
   Bike,
+  Bookmark,
   Check,
   ChevronDown,
   CircleAlert,
   Clock3,
   Fuel,
   GripVertical,
+  History,
   LocateFixed,
   MapPin,
   Navigation,
@@ -29,6 +31,15 @@ import {
   X,
   Zap,
 } from 'lucide-react'
+import { getRoadRoute, getTravelTable } from './lib/routing.js'
+import { getVehicleProfile, VEHICLE_OPTIONS } from './lib/vehicles.js'
+import {
+  addRouteHistory,
+  clearRouteHistory,
+  deleteRouteHistory,
+  loadRouteHistory,
+  toggleSavedRoute,
+} from './lib/history.js'
 
 const LAGOS_CENTER = [6.5244, 3.3792]
 const MAX_STOPS = 10
@@ -61,6 +72,17 @@ const formatDuration = (seconds = 0) => {
 const formatDistance = (meters = 0) => {
   const km = meters / 1000
   return km < 1 ? `${Math.round(meters)} m` : `${km.toFixed(km >= 10 ? 1 : 2)} km`
+}
+
+const formatDate = (value) => {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return 'Unknown date'
+  return new Intl.DateTimeFormat('en-NG', {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
 }
 
 const makePin = (label, active = false) =>
@@ -155,32 +177,12 @@ async function reverseGeocode(lat, lon) {
   return result.display_name || 'Current location'
 }
 
-async function getTravelTable(points) {
-  const coords = points.map((point) => `${point.lon},${point.lat}`).join(';')
-  const response = await fetch(
-    `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration,distance`,
-  )
-  if (!response.ok) throw new Error('The routing service is unavailable. Try again in a moment.')
-  const data = await response.json()
-  if (data.code !== 'Ok') throw new Error('Could not calculate a road matrix for these locations.')
-  return data
-}
-
-async function getRoadRoute(points) {
-  const coords = points.map((point) => `${point.lon},${point.lat}`).join(';')
-  const response = await fetch(
-    `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`,
-  )
-  if (!response.ok) throw new Error('Could not draw the road route right now.')
-  const data = await response.json()
-  if (data.code !== 'Ok' || !data.routes?.[0]) throw new Error('No driveable route was found between those stops.')
-  return data.routes[0]
-}
-
 function routeCost(order, durations) {
   let total = 0
   for (let index = 0; index < order.length - 1; index += 1) {
-    total += durations[order[index]][order[index + 1]] || Number.MAX_SAFE_INTEGER / 10
+    const duration = durations?.[order[index]]?.[order[index + 1]]
+    if (duration == null || !Number.isFinite(duration)) return Infinity
+    total += duration
   }
   return total
 }
@@ -192,7 +194,7 @@ function optimizeOrder(durations, pointCount) {
   const parent = Array.from({ length: stateCount }, () => Array(stopCount).fill(-1))
 
   for (let stop = 0; stop < stopCount; stop += 1) {
-    dp[1 << stop][stop] = durations[0][stop + 1] ?? Infinity
+    dp[1 << stop][stop] = durations?.[0]?.[stop + 1] ?? Infinity
   }
 
   for (let mask = 1; mask < stateCount; mask += 1) {
@@ -201,8 +203,8 @@ function optimizeOrder(durations, pointCount) {
 
       for (let next = 0; next < stopCount; next += 1) {
         if (mask & (1 << next)) continue
-        const travelTime = durations[last + 1][next + 1]
-        if (travelTime == null) continue
+        const travelTime = durations?.[last + 1]?.[next + 1]
+        if (travelTime == null || !Number.isFinite(travelTime)) continue
 
         const nextMask = mask | (1 << next)
         const candidate = dp[mask][last] + travelTime
@@ -215,10 +217,17 @@ function optimizeOrder(durations, pointCount) {
   }
 
   const fullMask = stateCount - 1
-  let last = 0
-  for (let index = 1; index < stopCount; index += 1) {
-    if (dp[fullMask][index] < dp[fullMask][last]) last = index
+  let last = -1
+  let bestCost = Infinity
+
+  for (let index = 0; index < stopCount; index += 1) {
+    if (dp[fullMask][index] < bestCost) {
+      bestCost = dp[fullMask][index]
+      last = index
+    }
   }
+
+  if (last === -1 || !Number.isFinite(bestCost)) return null
 
   const reversedStops = []
   let mask = fullMask
@@ -289,10 +298,16 @@ function App() {
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
-  const [vehicleEfficiency, setVehicleEfficiency] = useState(35)
+  const [vehicleId, setVehicleId] = useState('motorcycle')
+  const [vehicleEfficiency, setVehicleEfficiency] = useState(getVehicleProfile('motorcycle').efficiencyKmpl)
   const [fuelPrice, setFuelPrice] = useState(900)
   const [showSettings, setShowSettings] = useState(false)
+  const [routeHistory, setRouteHistory] = useState(() => loadRouteHistory())
+  const [historyFilter, setHistoryFilter] = useState('all')
+  const [activeHistoryId, setActiveHistoryId] = useState(null)
   const resultRef = useRef(null)
+
+  const vehicle = getVehicleProfile(vehicleId)
 
   const orderedPoints = useMemo(() => {
     if (!origin) return []
@@ -304,14 +319,31 @@ function App() {
     [routeData],
   )
 
+  const filteredHistory = useMemo(
+    () => historyFilter === 'saved' ? routeHistory.filter((item) => item.saved) : routeHistory,
+    [historyFilter, routeHistory],
+  )
+
+  const historyStats = useMemo(() => ({
+    runs: routeHistory.length,
+    savedSeconds: routeHistory.reduce((sum, item) => sum + Number(item.savedSeconds || 0), 0),
+    savedDistance: routeHistory.reduce((sum, item) => sum + Number(item.savedDistance || 0), 0),
+  }), [routeHistory])
+
+  const activeHistory = routeHistory.find((item) => item.id === activeHistoryId)
+
   const legs = routeData?.legs || []
   const totalTime = routeData?.duration || 0
   const totalDistance = routeData?.distance || 0
   const savedSeconds = Math.max(0, baselineSeconds - totalTime)
   const savedDistance = Math.max(0, baselineDistance - totalDistance)
+  const tripFuelLitres = vehicleEfficiency > 0 ? (totalDistance / 1000) / vehicleEfficiency : 0
+  const tripFuelCost = tripFuelLitres * fuelPrice
   const savedFuelLitres = vehicleEfficiency > 0 ? (savedDistance / 1000) / vehicleEfficiency : 0
   const savedFuelCost = savedFuelLitres * fuelPrice
-  const savingsPercent = baselineSeconds > 0 ? Math.round((savedSeconds / baselineSeconds) * 100) : 0
+  const savingsPercent = baselineSeconds > 0 && Number.isFinite(baselineSeconds)
+    ? Math.max(0, Math.round((savedSeconds / baselineSeconds) * 100))
+    : 0
 
   const clearFeedback = () => {
     setError('')
@@ -323,6 +355,16 @@ function App() {
     setRouteData(null)
     setBaselineSeconds(0)
     setBaselineDistance(0)
+    setActiveHistoryId(null)
+  }
+
+  const handleVehicleChange = (nextVehicleId) => {
+    const nextVehicle = getVehicleProfile(nextVehicleId)
+    setVehicleId(nextVehicleId)
+    setVehicleEfficiency(nextVehicle.efficiencyKmpl)
+    resetCalculatedRoute()
+    clearFeedback()
+    setMessage(`${nextVehicle.label} profile selected. Re-optimize to refresh ETA and fuel estimates.`)
   }
 
   const handleOriginSearch = async () => {
@@ -411,8 +453,8 @@ function App() {
 
   const handleSelectStop = (location) => {
     clearFeedback()
-    setStops((current) => [
-      ...current,
+    setStops((currentStops) => [
+      ...currentStops,
       { id: `stop-${Date.now()}-${location.id}`, ...location },
     ])
     resetCalculatedRoute()
@@ -422,7 +464,7 @@ function App() {
   }
 
   const handleRemoveStop = (id) => {
-    setStops((current) => current.filter((stop) => stop.id !== id))
+    setStops((currentStops) => currentStops.filter((stop) => stop.id !== id))
     resetCalculatedRoute()
   }
 
@@ -434,25 +476,71 @@ function App() {
 
     clearFeedback()
     setIsOptimizing(true)
+
     try {
+      const departureTime = new Date()
       const points = [origin, ...stops]
-      const table = await getTravelTable(points)
+      const table = await getTravelTable(points, vehicleId, departureTime)
       const originalOrder = points.map((_, index) => index)
       const bestOrder = optimizeOrder(table.durations, points.length)
-      const ordered = bestOrder.map((index) => points[index])
 
-      const originalSeconds = routeCost(originalOrder, table.durations)
-      let originalDistance = 0
-      for (let index = 0; index < originalOrder.length - 1; index += 1) {
-        originalDistance += table.distances[originalOrder[index]][originalOrder[index + 1]] || 0
+      if (!bestOrder) {
+        throw new Error('One or more stops could not be connected by a driveable route.')
       }
 
-      const roadRoute = await getRoadRoute(ordered)
-      setBaselineSeconds(originalSeconds)
-      setBaselineDistance(originalDistance)
+      const ordered = bestOrder.map((index) => points[index])
+      const originalSeconds = routeCost(originalOrder, table.durations)
+
+      let originalDistance = 0
+      for (let index = 0; index < originalOrder.length - 1; index += 1) {
+        const distance = table.distances?.[originalOrder[index]]?.[originalOrder[index + 1]]
+        if (distance != null && Number.isFinite(distance)) originalDistance += distance
+      }
+
+      const roadRoute = await getRoadRoute(ordered, vehicleId, departureTime)
+      const computedSavedSeconds = Number.isFinite(originalSeconds)
+        ? Math.max(0, originalSeconds - roadRoute.duration)
+        : 0
+      const computedSavedDistance = Math.max(0, originalDistance - roadRoute.distance)
+      const historyId = `route-${Date.now()}`
+
+      setBaselineSeconds(Number.isFinite(originalSeconds) ? originalSeconds : roadRoute.duration)
+      setBaselineDistance(originalDistance || roadRoute.distance)
       setOptimizedStops(ordered.slice(1))
-      setRouteData(roadRoute)
-      setMessage('Route optimized. The order below is your new delivery sequence.')
+      setRouteData({
+        ...roadRoute,
+        matrixProvider: table.provider,
+        matrixTrafficSource: table.trafficSource,
+      })
+      setActiveHistoryId(historyId)
+
+      const entry = {
+        id: historyId,
+        createdAt: new Date().toISOString(),
+        saved: false,
+        origin,
+        inputStops: stops,
+        optimizedStops: ordered.slice(1),
+        vehicleId,
+        vehicleLabel: vehicle.label,
+        totalTime: roadRoute.duration,
+        etaRange: roadRoute.etaRange,
+        totalDistance: roadRoute.distance,
+        baselineSeconds: Number.isFinite(originalSeconds) ? originalSeconds : roadRoute.duration,
+        baselineDistance: originalDistance || roadRoute.distance,
+        savedSeconds: computedSavedSeconds,
+        savedDistance: computedSavedDistance,
+        trafficSource: roadRoute.trafficSource || table.trafficSource || 'modeled',
+        trafficLabel: roadRoute.trafficLabel || 'Traffic adjusted',
+        provider: roadRoute.provider || table.provider || 'Routing provider',
+      }
+
+      setRouteHistory((currentHistory) => addRouteHistory(currentHistory, entry))
+      setMessage(
+        roadRoute.trafficSource === 'live'
+          ? 'Route optimized with live traffic data.'
+          : 'Route optimized with Routly traffic modeling. Configure the live traffic provider for real-time conditions.',
+      )
       window.setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
     } catch (err) {
       setError(err.message)
@@ -467,10 +555,7 @@ function App() {
     setStops(exampleLocations.stops)
     setOriginResults([])
     setStopResults([])
-    setOptimizedStops([])
-    setRouteData(null)
-    setBaselineSeconds(0)
-    setBaselineDistance(0)
+    resetCalculatedRoute()
     setMessage('Demo stops loaded. Hit optimize to see Routly reorder them.')
   }
 
@@ -483,6 +568,40 @@ function App() {
     setOriginResults([])
     setStopResults([])
     clearFeedback()
+  }
+
+  const handleToggleSaved = (routeId) => {
+    setRouteHistory((currentHistory) => toggleSavedRoute(currentHistory, routeId))
+  }
+
+  const handleDeleteHistory = (routeId) => {
+    setRouteHistory((currentHistory) => deleteRouteHistory(currentHistory, routeId))
+    if (activeHistoryId === routeId) setActiveHistoryId(null)
+  }
+
+  const handleClearHistory = () => {
+    if (!window.confirm('Clear all Routly route history saved on this device?')) return
+    setRouteHistory(clearRouteHistory())
+    setActiveHistoryId(null)
+  }
+
+  const handleRestoreHistory = (entry) => {
+    const restoredVehicle = getVehicleProfile(entry.vehicleId)
+    setOrigin({ ...entry.origin, id: 'origin' })
+    setStops((entry.inputStops || []).map((stop, index) => ({
+      ...stop,
+      id: stop.id || `restored-stop-${Date.now()}-${index}`,
+    })))
+    setVehicleId(restoredVehicle.id)
+    setVehicleEfficiency(restoredVehicle.efficiencyKmpl)
+    setOriginResults([])
+    setStopResults([])
+    resetCalculatedRoute()
+    clearFeedback()
+    setMessage('Route loaded from history. Optimize again to refresh current traffic and ETA.')
+    window.setTimeout(() => {
+      document.querySelector('.workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 100)
   }
 
   return (
@@ -629,6 +748,31 @@ function App() {
             </button>
           )}
 
+          <div className="vehicle-section">
+            <div className="vehicle-section-head">
+              <span>Vehicle type</span>
+              <small>Changes ETA + fuel assumptions</small>
+            </div>
+            <div className="vehicle-grid">
+              {VEHICLE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`vehicle-option ${vehicleId === option.id ? 'vehicle-option--active' : ''}`}
+                  onClick={() => handleVehicleChange(option.id)}
+                  aria-pressed={vehicleId === option.id}
+                  title={option.description}
+                >
+                  <strong>{option.label.slice(0, 1)}</strong>
+                  <span>{option.shortLabel}</span>
+                </button>
+              ))}
+            </div>
+            <p className="vehicle-note">
+              {vehicle.description} Routly adjusts congestion response, urban speed and fuel defaults. Van/truck height and weight restrictions are not yet enforced.
+            </p>
+          </div>
+
           <div className="fuel-settings">
             <button className="fuel-settings-toggle" onClick={() => setShowSettings((value) => !value)}>
               <span><Fuel size={16} /> Fuel assumptions</span>
@@ -638,7 +782,7 @@ function App() {
               <div className="fuel-settings-grid">
                 <label>
                   <span>Efficiency</span>
-                  <div><input type="number" min="1" value={vehicleEfficiency} onChange={(event) => setVehicleEfficiency(Number(event.target.value))} /><small>km/L</small></div>
+                  <div><input type="number" min="1" step="0.1" value={vehicleEfficiency} onChange={(event) => setVehicleEfficiency(Number(event.target.value))} /><small>km/L</small></div>
                 </label>
                 <label>
                   <span>Fuel price</span>
@@ -652,9 +796,11 @@ function App() {
           {message && !error && <div className="feedback feedback--success"><Check size={16} /><span>{message}</span></div>}
 
           <button className="optimize-button" onClick={handleOptimize} disabled={!origin || stops.length < 2 || isOptimizing}>
-            {isOptimizing ? <><span className="spinner spinner--dark" /> Finding your best route…</> : <><Zap size={18} fill="currentColor" /> Optimize my route</>}
+            {isOptimizing ? <><span className="spinner spinner--dark" /> Checking roads & traffic…</> : <><Zap size={18} fill="currentColor" /> Optimize my route</>}
           </button>
-          <p className="planner-hint">Routly keeps your start fixed and reorders the delivery stops after it.</p>
+          <p className="planner-hint">
+            Routly keeps your start fixed, reorders delivery stops, and refreshes ETA using live traffic when configured. Otherwise it falls back to its time-of-day traffic model.
+          </p>
         </aside>
 
         <div className="map-card">
@@ -692,7 +838,7 @@ function App() {
             </div>
           )}
 
-          <div className="map-chip map-chip--top"><span className="status-dot"></span> Live road map</div>
+          <div className="map-chip map-chip--top"><span className="status-dot"></span> Road map</div>
           <div className="map-chip map-chip--bottom"><MapPin size={14} /> {orderedPoints.length ? `${Math.max(0, orderedPoints.length - 1)} stops` : 'Lagos, Nigeria'}</div>
         </div>
       </section>
@@ -701,17 +847,47 @@ function App() {
         <div className="results-heading">
           <div>
             <span className="section-kicker">Optimized run</span>
-            <h2>Your fastest delivery sequence</h2>
+            <h2>Your traffic-aware delivery sequence</h2>
           </div>
           {savingsPercent > 0 && <div className="savings-pill"><Zap size={15} /> {savingsPercent}% faster than entered order</div>}
         </div>
 
+        {routeData && (
+          <>
+            <div className="route-meta-row">
+              <span className={`route-meta-chip route-meta-chip--${routeData.trafficSource === 'live' ? 'live' : 'modeled'}`}>
+                <span className="traffic-dot" />
+                {routeData.trafficSource === 'live' ? 'Live traffic' : 'Modeled traffic'}
+              </span>
+              <span className="route-meta-chip">{routeData.trafficLabel || 'Traffic adjusted'}</span>
+              <span className="route-meta-chip">{vehicle.label}</span>
+              <span className="route-meta-chip">{routeData.provider || 'Routing provider'}</span>
+            </div>
+
+            <div className="results-actions">
+              {activeHistoryId && (
+                <button
+                  className={`save-route-button ${activeHistory?.saved ? 'save-route-button--active' : ''}`}
+                  onClick={() => handleToggleSaved(activeHistoryId)}
+                >
+                  <Bookmark size={15} fill={activeHistory?.saved ? 'currentColor' : 'none'} />
+                  {activeHistory?.saved ? 'Saved route' : 'Save route'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
         <div className="metrics-grid">
           <article className="metric-card metric-card--accent">
             <span className="metric-icon"><Clock3 size={19} /></span>
-            <small>Total trip time</small>
+            <small>Traffic-adjusted ETA</small>
             <strong>{formatDuration(totalTime)}</strong>
-            <p>{savedSeconds > 0 ? `${formatDuration(savedSeconds)} saved` : 'Best road sequence found'}</p>
+            <p>
+              {routeData?.etaRange
+                ? `Likely ${formatDuration(routeData.etaRange.min)} – ${formatDuration(routeData.etaRange.max)}`
+                : savedSeconds > 0 ? `${formatDuration(savedSeconds)} saved` : 'Best road sequence found'}
+            </p>
           </article>
           <article className="metric-card">
             <span className="metric-icon"><Route size={19} /></span>
@@ -721,9 +897,13 @@ function App() {
           </article>
           <article className="metric-card">
             <span className="metric-icon"><Fuel size={19} /></span>
-            <small>Estimated fuel saved</small>
-            <strong>{savedFuelLitres > 0 ? `${savedFuelLitres.toFixed(2)} L` : '—'}</strong>
-            <p>{savedFuelCost > 0 ? `≈ ₦${Math.round(savedFuelCost).toLocaleString()} saved` : 'Based on your assumptions'}</p>
+            <small>Estimated {vehicle.shortLabel.toLowerCase()} fuel</small>
+            <strong>{tripFuelLitres > 0 ? `${tripFuelLitres.toFixed(2)} L` : '—'}</strong>
+            <p>
+              {tripFuelCost > 0
+                ? `≈ ₦${Math.round(tripFuelCost).toLocaleString()}${savedFuelCost > 0 ? ` • ₦${Math.round(savedFuelCost).toLocaleString()} saved` : ''}`
+                : 'Based on your fuel assumptions'}
+            </p>
           </article>
         </div>
 
@@ -749,11 +929,90 @@ function App() {
                   <div className="leg-stat">
                     <strong>{formatDuration(legs[index].duration)}</strong>
                     <span>{formatDistance(legs[index].distance)}</span>
+                    {legs[index].trafficLabel && <span>{legs[index].trafficLabel}</span>}
                   </div>
                 )}
                 {index === orderedPoints.length - 1 && <span className="done-badge"><Check size={14} /> Done</span>}
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="history-section" id="history">
+        <div className="history-shell">
+          <div className="history-heading">
+            <div>
+              <span className="section-kicker">Route history</span>
+              <h2>Runs this device remembers.</h2>
+            </div>
+            <div className="history-stats">
+              <div className="history-stat"><strong>{historyStats.runs}</strong><small>optimized runs</small></div>
+              <div className="history-stat"><strong>{historyStats.savedSeconds ? formatDuration(historyStats.savedSeconds) : '—'}</strong><small>estimated time saved</small></div>
+              <div className="history-stat"><strong>{historyStats.savedDistance ? formatDistance(historyStats.savedDistance) : '—'}</strong><small>estimated distance saved</small></div>
+            </div>
+          </div>
+
+          <div className="history-toolbar">
+            <div className="history-tabs">
+              <button className={`history-tab ${historyFilter === 'all' ? 'history-tab--active' : ''}`} onClick={() => setHistoryFilter('all')}>
+                <History size={13} /> All runs
+              </button>
+              <button className={`history-tab ${historyFilter === 'saved' ? 'history-tab--active' : ''}`} onClick={() => setHistoryFilter('saved')}>
+                <Bookmark size={13} /> Saved
+              </button>
+            </div>
+            {routeHistory.length > 0 && <button className="history-clear" onClick={handleClearHistory}>Clear history</button>}
+          </div>
+
+          <div className="history-list">
+            {filteredHistory.length ? filteredHistory.map((entry) => {
+              const historyVehicle = getVehicleProfile(entry.vehicleId)
+              const routeNames = [
+                entry.origin?.label,
+                ...(entry.optimizedStops || []).map((stop) => stop.label),
+              ].filter(Boolean)
+
+              return (
+                <article className="history-card" key={entry.id}>
+                  <div className="history-card-main">
+                    <div className="history-card-top">
+                      <strong>{formatDate(entry.createdAt)}</strong>
+                      <span className="history-vehicle">{historyVehicle.shortLabel}</span>
+                      <span className={`history-source ${entry.trafficSource === 'live' ? 'history-source--live' : ''}`}>
+                        {entry.trafficSource === 'live' ? 'Live traffic' : 'Modeled traffic'}
+                      </span>
+                      {entry.saved && <span className="history-saved">Saved</span>}
+                    </div>
+                    <p className="history-route">{routeNames.join(' → ')}</p>
+                    <div className="history-card-metrics">
+                      <span>{formatDuration(entry.totalTime)}</span>
+                      <span>{formatDistance(entry.totalDistance)}</span>
+                      <span>{(entry.optimizedStops || []).length} stops</span>
+                      {entry.savedSeconds > 0 && <span>{formatDuration(entry.savedSeconds)} saved</span>}
+                    </div>
+                  </div>
+                  <div className="history-card-actions">
+                    <button title="Load this route" aria-label="Load this route" onClick={() => handleRestoreHistory(entry)}>
+                      <RotateCcw size={15} />
+                    </button>
+                    <button title={entry.saved ? 'Remove from saved' : 'Save route'} aria-label={entry.saved ? 'Remove from saved' : 'Save route'} onClick={() => handleToggleSaved(entry.id)}>
+                      <Bookmark size={15} fill={entry.saved ? 'currentColor' : 'none'} />
+                    </button>
+                    <button title="Delete from history" aria-label="Delete from history" onClick={() => handleDeleteHistory(entry.id)}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                </article>
+              )
+            }) : (
+              <div className="history-empty">
+                <div>
+                  <strong>{historyFilter === 'saved' ? 'No saved routes yet.' : 'No optimized runs yet.'}</strong>
+                  <p>{historyFilter === 'saved' ? 'Bookmark a useful route after optimizing it.' : 'Your optimized runs will appear here automatically.'}</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -764,15 +1023,15 @@ function App() {
           <h2>Four drops shouldn’t feel like eight.</h2>
         </div>
         <p>
-          Riders usually receive stops in whatever order they were entered. Routly compares the road travel time between them,
-          reorders the sequence, and gives the rider one clearer run. Less backtracking. Less fuel burned. Less Lagos-induced suffering.
+          Riders usually receive stops in whatever order they were entered. Routly compares road travel time between them,
+          factors in traffic and the selected vehicle, then gives the rider one clearer run. Less backtracking. Less fuel burned. Less Lagos-induced suffering.
         </p>
       </section>
 
       <footer>
         <a className="brand brand--footer" href="#top"><span className="brand-mark"><Route size={18} /></span><span>Routly</span></a>
         <p>Smarter multi-stop routing for delivery riders and small fleets.</p>
-        <span>Built around OpenStreetMap road data.</span>
+        <span>Traffic-aware routing with OpenStreetMap fallback.</span>
       </footer>
     </main>
   )
