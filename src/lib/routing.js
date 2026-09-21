@@ -1,5 +1,7 @@
 import { adjustMatrix, adjustRoute, buildEtaRange } from './traffic.js'
 
+const fetchWithTimeout = (url, options = {}) => fetch(url, { ...options, signal: AbortSignal.timeout(15000) })
+
 const GOOGLE_PROXY_MATRIX = '/api/route-matrix'
 const GOOGLE_PROXY_ROUTE = '/api/route'
 
@@ -11,7 +13,7 @@ const ensureJson = async (response) => {
 
 const tryLiveMatrix = async (points, vehicleId, departureTime) => {
   try {
-    const response = await fetch(GOOGLE_PROXY_MATRIX, {
+    const response = await fetchWithTimeout(GOOGLE_PROXY_MATRIX, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -32,7 +34,7 @@ const tryLiveMatrix = async (points, vehicleId, departureTime) => {
 
 const tryLiveRoute = async (points, vehicleId, departureTime) => {
   try {
-    const response = await fetch(GOOGLE_PROXY_ROUTE, {
+    const response = await fetchWithTimeout(GOOGLE_PROXY_ROUTE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -66,7 +68,7 @@ export async function getTravelTable(points, vehicleId, departureTime = new Date
   }
 
   const coords = points.map((point) => `${point.lon},${point.lat}`).join(';')
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration,distance`,
   )
 
@@ -93,7 +95,7 @@ export async function getRoadRoute(points, vehicleId, departureTime = new Date()
   if (live) return live
 
   const coords = points.map((point) => `${point.lon},${point.lat}`).join(';')
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`,
   )
 

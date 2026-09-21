@@ -16,8 +16,10 @@ export const inLagosArea = ({ lat, lon }) =>
 const decimalHour = (date) => date.getHours() + date.getMinutes() / 60
 
 export function getLagosTrafficProfile(date = new Date()) {
-  const hour = decimalHour(date)
-  const weekend = date.getDay() === 0 || date.getDay() === 6
+  // Lagos uses UTC+1 year-round, regardless of the viewer's device timezone.
+  const lagos = new Date(date.getTime() + 60 * 60 * 1000)
+  const hour = lagos.getUTCHours() + lagos.getUTCMinutes() / 60
+  const weekend = lagos.getUTCDay() === 0 || lagos.getUTCDay() === 6
 
   if (weekend) {
     if (hour < 6) return { key: 'light', label: 'Light traffic', multiplier: 1.18, speedKmh: 34, uncertainty: 0.13 }
@@ -180,7 +182,7 @@ export function adjustRoute({
 export function buildEtaRange(duration, source = 'modeled') {
   const uncertainty = source === 'live' ? 0.1 : 0.18
   return {
-    min: Math.max(60, Math.round(duration * (1 - uncertainty))),
+    min: Math.max(0, Math.round(duration * (1 - uncertainty))),
     max: Math.round(duration * (1 + uncertainty)),
   }
 }
