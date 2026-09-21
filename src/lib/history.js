@@ -14,7 +14,14 @@ export function loadRouteHistory() {
 
   try {
     const value = safeParse(window.localStorage.getItem(HISTORY_KEY), [])
-    return Array.isArray(value) ? value : []
+    return Array.isArray(value) ? value.filter((entry) => {
+      const validPoint = (point) => point && Number.isFinite(point.lat) && Number.isFinite(point.lon) &&
+        Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180 && typeof point.label === 'string'
+      return entry && typeof entry.id === 'string' && validPoint(entry.origin) &&
+        Array.isArray(entry.inputStops) && entry.inputStops.length >= 2 && entry.inputStops.length <= 10 &&
+        entry.inputStops.every(validPoint) && Array.isArray(entry.optimizedStops) &&
+        entry.optimizedStops.every(validPoint)
+    }).slice(0, MAX_HISTORY) : []
   } catch {
     return []
   }

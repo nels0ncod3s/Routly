@@ -11,7 +11,9 @@ const validPoints = (points) =>
   Array.isArray(points) &&
   points.length >= 2 &&
   points.length <= 11 &&
-  points.every((point) => Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lon)))
+  points.every((point) => point &&
+    typeof point.lat === 'number' && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90 &&
+    typeof point.lon === 'number' && Number.isFinite(point.lon) && Math.abs(point.lon) <= 180)
 
 const location = (point) => ({
   location: {
@@ -120,7 +122,7 @@ export default async function handler(req, res) {
       trafficSource: 'live',
       trafficLabel: trafficLabel(duration, staticDuration),
       etaRange: {
-        min: Math.max(60, Math.round(duration * 0.9)),
+        min: Math.max(0, Math.round(duration * 0.9)),
         max: Math.round(duration * 1.1),
       },
       departureTime: departure(departureTime),

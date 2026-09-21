@@ -11,7 +11,9 @@ const validPoints = (points) =>
   Array.isArray(points) &&
   points.length >= 2 &&
   points.length <= 11 &&
-  points.every((point) => Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lon)))
+  points.every((point) => point &&
+    typeof point.lat === 'number' && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90 &&
+    typeof point.lon === 'number' && Number.isFinite(point.lon) && Math.abs(point.lon) <= 180)
 
 const waypoint = (point) => ({
   waypoint: {
@@ -90,7 +92,8 @@ export default async function handler(req, res) {
     for (const element of elements) {
       const row = element.originIndex
       const col = element.destinationIndex
-      if (!Number.isInteger(row) || !Number.isInteger(col)) continue
+      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0 || row >= size || col >= size) continue
+      if (element.status?.code || !element.duration) continue
       if (element.condition && element.condition !== 'ROUTE_EXISTS') continue
       durations[row][col] = durationToSeconds(element.duration)
       staticDurations[row][col] = durationToSeconds(element.staticDuration)

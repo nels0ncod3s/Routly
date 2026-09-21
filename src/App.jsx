@@ -22,7 +22,6 @@ import {
   LocateFixed,
   MapPin,
   Navigation,
-  Plus,
   RotateCcw,
   Route,
   Search,
@@ -62,7 +61,7 @@ const exampleLocations = {
 }
 
 const formatDuration = (seconds = 0) => {
-  const minutes = Math.max(1, Math.round(seconds / 60))
+  const minutes = Math.max(0, Math.round(seconds / 60))
   if (minutes < 60) return `${minutes} min`
   const hours = Math.floor(minutes / 60)
   const remainder = minutes % 60
@@ -147,7 +146,7 @@ const getResultContext = (result) => {
 async function searchLocations(query) {
   const response = await fetch(
     `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&dedupe=1&limit=${SEARCH_RESULT_LIMIT}&accept-language=en&q=${encodeURIComponent(query)}`,
-    { headers: { Accept: 'application/json' } },
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) },
   )
 
   if (!response.ok) throw new Error('Could not search locations right now.')
@@ -170,7 +169,7 @@ async function searchLocations(query) {
 async function reverseGeocode(lat, lon) {
   const response = await fetch(
     `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`,
-    { headers: { Accept: 'application/json' } },
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) },
   )
   if (!response.ok) throw new Error('Unable to identify your current location.')
   const result = await response.json()
@@ -306,6 +305,13 @@ function App() {
   const [historyFilter, setHistoryFilter] = useState('all')
   const [activeHistoryId, setActiveHistoryId] = useState(null)
   const resultRef = useRef(null)
+  const requests = useRef({ origin: 0, stop: 0, route: 0 })
+  const invalidateSearches = () => {
+    requests.current.origin += 1
+    requests.current.stop += 1
+    setIsSearchingOrigin(false)
+    setIsSearchingStop(false)
+  }
 
   const vehicle = getVehicleProfile(vehicleId)
 
@@ -351,6 +357,8 @@ function App() {
   }
 
   const resetCalculatedRoute = () => {
+    requests.current.route += 1
+    setIsOptimizing(false)
     setOptimizedStops([])
     setRouteData(null)
     setBaselineSeconds(0)
@@ -369,25 +377,29 @@ function App() {
 
   const handleOriginSearch = async () => {
     const query = originInput.trim()
+    if (isSearchingOrigin) return
     if (!query) return
+    const requestId = ++requests.current.origin
     clearFeedback()
     setOriginResults([])
     setIsSearchingOrigin(true)
 
     try {
       const results = await searchLocations(query)
+      if (requestId !== requests.current.origin) return
       setOriginResults(results)
       if (!results.length) setError(`No places named “${query}” were found. Try adding a city, area or street.`)
     } catch (err) {
-      setError(err.message)
+      if (requestId === requests.current.origin) setError(err.message)
     } finally {
-      setIsSearchingOrigin(false)
+      if (requestId === requests.current.origin) setIsSearchingOrigin(false)
     }
   }
 
   const handleSelectOrigin = (location) => {
     clearFeedback()
-    setOrigin({ id: 'origin', ...location })
+    requests.current.origin += 1
+    setOrigin({ ...location, id: 'origin' })
     setOriginInput('')
     setOriginResults([])
     resetCalculatedRoute()
@@ -402,6 +414,7 @@ function App() {
       return
     }
 
+    const requestId = ++requests.current.origin
     setIsSearchingOrigin(true)
     navigator.geolocation.getCurrentPosition(
       async ({ coords }) => {
@@ -412,6 +425,7 @@ function App() {
           } catch {
             // Coordinates are enough to route even if reverse geocoding fails.
           }
+          if (requestId !== requests.current.origin) return
           setOrigin({
             id: 'origin',
             label: 'Current location',
@@ -422,10 +436,11 @@ function App() {
           resetCalculatedRoute()
           setMessage('Using your current location as the starting point.')
         } finally {
-          setIsSearchingOrigin(false)
+          if (requestId === requests.current.origin) setIsSearchingOrigin(false)
         }
       },
       () => {
+        if (requestId !== requests.current.origin) return
         setError('Location access was unavailable. Enter your starting point manually.')
         setIsSearchingOrigin(false)
       },
@@ -435,27 +450,32 @@ function App() {
 
   const handleStopSearch = async () => {
     const query = stopInput.trim()
+    if (isSearchingStop) return
     if (!query || stops.length >= MAX_STOPS) return
+    const requestId = ++requests.current.stop
     clearFeedback()
     setStopResults([])
     setIsSearchingStop(true)
 
     try {
       const results = await searchLocations(query)
+      if (requestId !== requests.current.stop) return
       setStopResults(results)
       if (!results.length) setError(`No places named “${query}” were found. Try adding a city, area or street.`)
     } catch (err) {
-      setError(err.message)
+      if (requestId === requests.current.stop) setError(err.message)
     } finally {
-      setIsSearchingStop(false)
+      if (requestId === requests.current.stop) setIsSearchingStop(false)
     }
   }
 
   const handleSelectStop = (location) => {
+    if (stops.length >= MAX_STOPS) return
+    requests.current.stop += 1
     clearFeedback()
-    setStops((currentStops) => [
+    setStops((currentStops) => currentStops.length >= MAX_STOPS ? currentStops : [
       ...currentStops,
-      { id: `stop-${Date.now()}-${location.id}`, ...location },
+      { ...location, id: crypto.randomUUID() },
     ])
     resetCalculatedRoute()
     setStopInput('')
@@ -475,12 +495,14 @@ function App() {
     }
 
     clearFeedback()
+    const requestId = ++requests.current.route
     setIsOptimizing(true)
 
     try {
       const departureTime = new Date()
       const points = [origin, ...stops]
       const table = await getTravelTable(points, vehicleId, departureTime)
+      if (requestId !== requests.current.route) return
       const originalOrder = points.map((_, index) => index)
       const bestOrder = optimizeOrder(table.durations, points.length)
 
@@ -488,23 +510,25 @@ function App() {
         throw new Error('One or more stops could not be connected by a driveable route.')
       }
 
-      const ordered = bestOrder.map((index) => points[index])
+      let ordered = bestOrder.map((index) => points[index])
       const originalSeconds = routeCost(originalOrder, table.durations)
 
-      let originalDistance = 0
-      for (let index = 0; index < originalOrder.length - 1; index += 1) {
-        const distance = table.distances?.[originalOrder[index]]?.[originalOrder[index + 1]]
-        if (distance != null && Number.isFinite(distance)) originalDistance += distance
-      }
-
-      const roadRoute = await getRoadRoute(ordered, vehicleId, departureTime)
-      const computedSavedSeconds = Number.isFinite(originalSeconds)
-        ? Math.max(0, originalSeconds - roadRoute.duration)
-        : 0
+      const [candidateRoute, baselineRoute] = await Promise.all([
+        getRoadRoute(ordered, vehicleId, departureTime),
+        Number.isFinite(originalSeconds) ? getRoadRoute(points, vehicleId, departureTime).catch(() => null) : Promise.resolve(null),
+      ])
+      if (requestId !== requests.current.route) return
+      const comparable = baselineRoute?.trafficSource === candidateRoute.trafficSource
+      const useOriginal = comparable && baselineRoute.duration < candidateRoute.duration
+      const roadRoute = useOriginal ? baselineRoute : candidateRoute
+      if (useOriginal) ordered = points
+      const baselineTime = comparable ? baselineRoute.duration : roadRoute.duration
+      const originalDistance = comparable ? baselineRoute.distance : roadRoute.distance
+      const computedSavedSeconds = Math.max(0, baselineTime - roadRoute.duration)
       const computedSavedDistance = Math.max(0, originalDistance - roadRoute.distance)
       const historyId = `route-${Date.now()}`
 
-      setBaselineSeconds(Number.isFinite(originalSeconds) ? originalSeconds : roadRoute.duration)
+      setBaselineSeconds(baselineTime)
       setBaselineDistance(originalDistance || roadRoute.distance)
       setOptimizedStops(ordered.slice(1))
       setRouteData({
@@ -526,7 +550,7 @@ function App() {
         totalTime: roadRoute.duration,
         etaRange: roadRoute.etaRange,
         totalDistance: roadRoute.distance,
-        baselineSeconds: Number.isFinite(originalSeconds) ? originalSeconds : roadRoute.duration,
+        baselineSeconds: baselineTime,
         baselineDistance: originalDistance || roadRoute.distance,
         savedSeconds: computedSavedSeconds,
         savedDistance: computedSavedDistance,
@@ -539,17 +563,20 @@ function App() {
       setMessage(
         roadRoute.trafficSource === 'live'
           ? 'Route optimized with live traffic data.'
-          : 'Route optimized with Routly traffic modeling. Configure the live traffic provider for real-time conditions.',
+          : 'Route optimized with Routly traffic modeling. These are estimates, not live road conditions.',
       )
       window.setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
     } catch (err) {
-      setError(err.message)
+      if (requestId === requests.current.route) setError(err.message)
     } finally {
-      setIsOptimizing(false)
+      if (requestId === requests.current.route) setIsOptimizing(false)
     }
   }
 
   const handleLoadExample = () => {
+    invalidateSearches()
+    setOriginInput('')
+    setStopInput('')
     clearFeedback()
     setOrigin(exampleLocations.start)
     setStops(exampleLocations.stops)
@@ -560,11 +587,12 @@ function App() {
   }
 
   const handleReset = () => {
+    invalidateSearches()
+    setOriginInput('')
+    setStopInput('')
     setOrigin(null)
     setStops([])
     resetCalculatedRoute()
-    setOriginInput('')
-    setStopInput('')
     setOriginResults([])
     setStopResults([])
     clearFeedback()
@@ -586,11 +614,14 @@ function App() {
   }
 
   const handleRestoreHistory = (entry) => {
+    invalidateSearches()
+    setOriginInput('')
+    setStopInput('')
     const restoredVehicle = getVehicleProfile(entry.vehicleId)
     setOrigin({ ...entry.origin, id: 'origin' })
     setStops((entry.inputStops || []).map((stop, index) => ({
       ...stop,
-      id: stop.id || `restored-stop-${Date.now()}-${index}`,
+      id: `restored-stop-${Date.now()}-${index}`,
     })))
     setVehicleId(restoredVehicle.id)
     setVehicleEfficiency(restoredVehicle.efficiencyKmpl)
@@ -614,43 +645,66 @@ function App() {
         <div className="topbar-badge"><span></span> Built for last-mile delivery</div>
       </header>
 
-      <section className="hero" id="top">
-        <div className="hero-copy">
-          <div className="eyebrow"><Sparkles size={14} /> Route intelligence for everyday riders</div>
-          <h1>Stop riding in circles.<br /><span>Take the smarter route.</span></h1>
-          <p>
-            Add every delivery drop. Routly reshuffles them into a faster road sequence,
-            estimates each leg, and shows how much time, distance and fuel you can save.
-          </p>
-          <div className="hero-proof">
-            <div><strong>01</strong><span>Add your drops</span></div>
-            <ArrowRight size={16} />
-            <div><strong>02</strong><span>Optimize once</span></div>
-            <ArrowRight size={16} />
-            <div><strong>03</strong><span>Ride smarter</span></div>
+      <section className="hero" id="top" aria-labelledby="hero-title">
+        <div className="hero-main">
+          <div className="hero-copy">
+            <div className="eyebrow"><span className="hero-status" /> A LITTLE PLANNING. A LOT LESS RIDING.</div>
+            <h1 id="hero-title">More drops.<br />Fewer <span>detours.</span></h1>
+            <p>A busy day doesn’t need a messy route. Add your stops and find a better way through them—with trip times and fuel estimates before you leave.</p>
+            <div className="hero-actions">
+              <a className="hero-primary" href="#planner">Plan my route <ArrowRight size={19} /></a>
+              <button className="hero-secondary" onClick={() => {
+                handleLoadExample()
+                document.getElementById('planner')?.focus({ preventScroll: true })
+                document.getElementById('planner')?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+              }}>Try an example <ArrowRight size={16} /></button>
+            </div>
+            <div className="hero-note"><Check size={14} /> No sign-up <span>·</span> Up to 10 stops <span>·</span> Your choice of vehicle</div>
+          </div>
+          <div className="route-preview" role="img" aria-label="Illustrative delivery route with a fixed start and four numbered stops. Actual routes are calculated in the planner.">
+            <div className="preview-heading"><span><Route size={17} /> YOUR DAY, MAPPED OUT</span><span className="preview-demo">Sample route</span></div>
+            <div className="preview-map" aria-hidden="true">
+              <svg viewBox="0 0 600 400" className="preview-map-art">
+                <defs>
+                  <pattern id="street-grid" width="58" height="58" patternTransform="rotate(-18)" patternUnits="userSpaceOnUse"><path d="M0 0H58V58" fill="none" stroke="#294536" strokeWidth="1" /></pattern>
+                </defs>
+                <rect width="600" height="400" fill="url(#street-grid)" />
+                <path d="M510 -30C370 70 520 110 430 210S440 335 330 430" stroke="#254537" strokeWidth="65" fill="none" />
+                <path d="M-20 285L620 85M100 -20L220 420M-20 100L620 290" stroke="#36503e" strokeWidth="8" fill="none" />
+                <path d="M85 280L140 260Q157 254 165 231L195 106L321 81Q346 75 355 86L485 157L433 204L295 280" className="preview-new-route" />
+                <g className="preview-start"><circle cx="85" cy="280" r="23" /><path d="M77 285L85 271L93 285L85 282Z" /></g>
+                {[[195, 106, '1'], [355, 86, '2'], [485, 157, '3'], [295, 280, '4']].map(([x, y, label]) => (
+                  <g className="preview-stop" key={label}><circle cx={x} cy={y} r="20" /><text x={x} y={y} dy=".35em" textAnchor="middle">{label}</text></g>
+                ))}
+                <text x="50" y="326" className="preview-map-label">YOUR START</text>
+                <text x="260" y="326" className="preview-map-label">LAST DROP</text>
+                <text x="380" y="370" className="preview-water-label">LESS BACKTRACKING.</text>
+              </svg>
+              <div className="preview-float"><Check size={15} /><span>Every stop. In a smarter order.</span></div>
+            </div>
+            <div className="preview-summary">
+              <span className="preview-summary-icon"><Bike size={23} /></span>
+              <div><strong>A clearer run from start to finish.</strong><p>You bring the stops. We’ll connect the dots.</p></div>
+              <ArrowRight size={20} />
+            </div>
           </div>
         </div>
-
-        <div className="hero-orbit" aria-hidden="true">
-          <div className="orbit-card orbit-card--one"><MapPin size={18} /> C</div>
-          <div className="orbit-card orbit-card--two"><MapPin size={18} /> A</div>
-          <div className="orbit-card orbit-card--three"><MapPin size={18} /> B</div>
-          <div className="orbit-bike"><Bike size={34} /></div>
-          <svg viewBox="0 0 460 300" className="orbit-line">
-            <path d="M55 220C96 88 188 248 240 137C278 57 372 63 412 123" />
-          </svg>
-          <div className="orbit-caption"><Zap size={15} /> A → B → C becomes C → A → B</div>
+        <div className="hero-features">
+          <div><Route size={20} /><span>Find a better stop order</span></div>
+          <div><Clock3 size={20} /><span>See the time for every leg</span></div>
+          <div><Fuel size={20} /><span>Estimate your fuel cost</span></div>
+          <a href="#planner">LET’S GET MOVING <ArrowRight size={16} /></a>
         </div>
       </section>
 
-      <section className="workspace">
+      <section className="workspace" id="planner" tabIndex={-1} aria-label="Route planner">
         <aside className="planner-panel">
           <div className="panel-heading">
             <div>
               <span className="section-kicker">Plan a run</span>
               <h2>Where are you going?</h2>
             </div>
-            {(origin || stops.length) && (
+            {Boolean(origin || stops.length) && (
               <button className="icon-button" onClick={handleReset} title="Reset route" aria-label="Reset route">
                 <RotateCcw size={17} />
               </button>
@@ -676,6 +730,8 @@ function App() {
                     <input
                       value={originInput}
                       onChange={(event) => {
+                        requests.current.origin += 1
+                        setIsSearchingOrigin(false)
                         setOriginInput(event.target.value)
                         setOriginResults([])
                       }}
@@ -722,6 +778,8 @@ function App() {
                   <input
                     value={stopInput}
                     onChange={(event) => {
+                      requests.current.stop += 1
+                      setIsSearchingStop(false)
                       setStopInput(event.target.value)
                       setStopResults([])
                     }}
@@ -792,8 +850,8 @@ function App() {
             )}
           </div>
 
-          {error && <div className="feedback feedback--error"><CircleAlert size={16} /><span>{error}</span></div>}
-          {message && !error && <div className="feedback feedback--success"><Check size={16} /><span>{message}</span></div>}
+          {error && <div role="alert" className="feedback feedback--error"><CircleAlert size={16} /><span>{error}</span></div>}
+          {message && !error && <div role="status" className="feedback feedback--success"><Check size={16} /><span>{message}</span></div>}
 
           <button className="optimize-button" onClick={handleOptimize} disabled={!origin || stops.length < 2 || isOptimizing}>
             {isOptimizing ? <><span className="spinner spinner--dark" /> Checking roads & traffic…</> : <><Zap size={18} fill="currentColor" /> Optimize my route</>}
